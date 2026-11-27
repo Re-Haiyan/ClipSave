@@ -55,10 +55,11 @@ class DirectMedia {
     CancelToken? cancellation,
     void Function(int, int?)? onProgress,
   }) async {
+    _validateUrl(uri);
     final client = HttpClient()
       ..autoUncompress = false
       ..connectionTimeout = const Duration(seconds: 10)
-      ..findProxy = (_) => 'DIRECT'
+      ..findProxy = ((_) => 'DIRECT')
       ..connectionFactory = (url, _, _) async {
         final candidates = await InternetAddress.lookup(
           url.host, type: InternetAddressType.IPv4,
