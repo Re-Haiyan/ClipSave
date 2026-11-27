@@ -22,6 +22,14 @@ void main() {
     expect(find.text('Saved videos'), findsOneWidget);
     expect(find.text('Download MP4'), findsNothing);
 
+    await tester.enterText(
+      find.byType(TextField),
+      'https://www.youtube.com/shorts/Iq6VVB__5eY',
+    );
+    await tester.tap(find.text('Preview link'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('YouTube Shorts need a backend'), findsOneWidget);
+
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
     expect(find.text('Backend address'), findsOneWidget);

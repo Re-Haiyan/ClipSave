@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'direct_media.dart';
+
 void main() => runApp(const ClipSave());
 
 class ClipSave extends StatelessWidget {
@@ -47,6 +49,7 @@ class _DownloadPageState extends State<DownloadPage> {
   List<File> saved = [];
   Map<String, dynamic>? preview;
   String? inspectedUrl;
+  bool needsBackend = false;
   String? quality;
   String? message;
   String? phase;
@@ -96,7 +99,9 @@ class _DownloadPageState extends State<DownloadPage> {
       final file = await settingsFile();
       if (!await file.exists()) return;
       final address = (await file.readAsString()).trim();
-      if (mounted && validBackend(address)) api.options.baseUrl = address;
+      if (mounted && (address.isEmpty || validBackend(address))) {
+        api.options.baseUrl = address;
+      }
     } on FileSystemException {
       // A missing settings file uses the build's backend address.
     } catch (_) {
@@ -119,10 +124,13 @@ class _DownloadPageState extends State<DownloadPage> {
           child: TextFormField(
             initialValue: initial,
             keyboardType: TextInputType.url,
-            decoration: const InputDecoration(labelText: 'Server URL'),
+            decoration: const InputDecoration(
+              labelText: 'Server URL',
+              helperText: 'Optional for direct MP4 links',
+            ),
             onChanged: (value) =>
                 address = value.trim().replaceFirst(RegExp(r'/+$'), ''),
-            validator: (_) => validBackend(address)
+            validator: (_) => address.isEmpty || validBackend(address)
                 ? null
                 : 'Enter a server URL. Release builds require HTTPS.',
           ),
@@ -203,10 +211,6 @@ class _DownloadPageState extends State<DownloadPage> {
   Future<void> inspect() async {
     final input = url.text.trim();
     final link = Uri.tryParse(input);
-    if (!validBackend(api.options.baseUrl)) {
-      setState(() => message = 'Enter your backend address in Settings.');
-      return;
-    }
     if (link == null ||
         link.host.isEmpty ||
         !['http', 'https'].contains(link.scheme)) {
@@ -214,14 +218,30 @@ class _DownloadPageState extends State<DownloadPage> {
       return;
     }
     if (inspecting || transfer != null) return;
+    final useBackend = DirectMedia.isYouTube(link) ||
+        (link.scheme == 'http' && validBackend(api.options.baseUrl));
+    if (useBackend && !validBackend(api.options.baseUrl)) {
+      setState(() => message = 'YouTube Shorts need a backend. Add one in Settings or paste a direct HTTPS MP4 link.');
+      return;
+    }
     resetPreview();
     setState(() => inspecting = true);
     try {
-      final result = await api.post<Map<String, dynamic>>(
-        '/inspect',
-        data: {'url': input},
-      );
-      final data = result.data!;
+      final Map<String, dynamic> data;
+      if (useBackend) {
+        final result = await api.post<Map<String, dynamic>>(
+          '/inspect',
+          data: {'url': input},
+        );
+        data = result.data!;
+      } else {
+        data = {
+          'title': await DirectMedia.preview(link),
+          'qualities': [
+            {'id': 'original', 'label': 'Original'},
+          ],
+        };
+      }
       final choices = data['qualities'] as List;
       if (choices.isEmpty) {
         throw const FormatException('No MP4 quality is available.');
@@ -230,6 +250,7 @@ class _DownloadPageState extends State<DownloadPage> {
       setState(() {
         preview = data;
         inspectedUrl = input;
+        needsBackend = useBackend;
         quality = (choices.first as Map)['id'] as String;
       });
     } catch (error) {
@@ -264,47 +285,49 @@ class _DownloadPageState extends State<DownloadPage> {
     File? partial;
     File? completed;
     try {
-      // Wait for the job ID so cancellation can stop a job created in flight.
-      final start = await api.post<Map<String, dynamic>>(
-        '/jobs',
-        data: {'url': source, 'quality': selected},
-      );
-      id = start.data!['id'] as String;
-      while (!cancellation.isCancelled) {
-        final response = await api.get<Map<String, dynamic>>(
-          '/jobs/$id',
-          cancelToken: cancellation,
+      if (needsBackend) {
+        // Wait for the job ID so cancellation can stop a job created in flight.
+        final start = await api.post<Map<String, dynamic>>(
+          '/jobs',
+          data: {'url': source, 'quality': selected},
         );
-        final status = response.data!;
-        switch (status['state']) {
-          case 'completed':
-            break;
-          case 'failed':
-          case 'canceled':
-            throw FormatException(
-              status['error'] as String? ?? 'The download was canceled.',
-            );
-          default:
-            final ratio = (status['progress'] as num?)?.toDouble();
-            if (mounted) {
-              setState(() {
-                phase = switch (status['state']) {
-                  'downloading' => 'Downloading from source',
-                  'processing' => 'Preparing MP4',
-                  _ => 'Preparing video',
-                };
-                progress = ratio;
-              });
-            }
-            await Future<void>.delayed(const Duration(milliseconds: 500));
-            continue;
+        id = start.data!['id'] as String;
+        while (!cancellation.isCancelled) {
+          final response = await api.get<Map<String, dynamic>>(
+            '/jobs/$id',
+            cancelToken: cancellation,
+          );
+          final status = response.data!;
+          switch (status['state']) {
+            case 'completed':
+              break;
+            case 'failed':
+            case 'canceled':
+              throw FormatException(
+                status['error'] as String? ?? 'The download was canceled.',
+              );
+            default:
+              final ratio = (status['progress'] as num?)?.toDouble();
+              if (mounted) {
+                setState(() {
+                  phase = switch (status['state']) {
+                    'downloading' => 'Downloading from source',
+                    'processing' => 'Preparing MP4',
+                    _ => 'Preparing video',
+                  };
+                  progress = ratio;
+                });
+              }
+              await Future<void>.delayed(const Duration(milliseconds: 500));
+              continue;
+          }
+          break;
         }
-        break;
+        if (cancellation.isCancelled) return;
       }
-      if (cancellation.isCancelled) return;
       final folder = await videoFolder();
       final clean = title
-          .replaceAll(RegExp(r'[^p{L}p{N} ._-]', unicode: true), '_')
+          .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1f]'), '_')
           .trim();
       final short = String.fromCharCodes(clean.runes.take(45));
       final stem = short.isEmpty ? 'Video' : short;
@@ -314,20 +337,26 @@ class _DownloadPageState extends State<DownloadPage> {
       partial = File('$path.part');
       if (mounted) {
         setState(() {
-          phase = 'Saving to device';
+          phase = needsBackend ? 'Saving to device' : 'Downloading MP4';
           progress = null;
         });
       }
-      await api.download(
-        '/jobs/$id/file',
-        partial.path,
-        cancelToken: cancellation,
-        onReceiveProgress: (received, total) {
-          if (mounted && !cancellation.isCancelled && total > 0) {
-            setState(() => progress = received / total);
-          }
-        },
-      );
+      void updateProgress(int received, int? total) {
+        if (mounted && !cancellation.isCancelled && total != null && total > 0) {
+          setState(() => progress = received / total);
+        }
+      }
+
+      if (needsBackend) {
+        await api.download(
+          '/jobs/$id/file',
+          partial.path,
+          cancelToken: cancellation,
+          onReceiveProgress: updateProgress,
+        );
+      } else {
+        await DirectMedia.download(Uri.parse(source), partial, cancellation, updateProgress);
+      }
       if (cancellation.isCancelled) return;
       completed = await partial.rename(path);
       await loadHistory();
@@ -465,19 +494,6 @@ class _DownloadPageState extends State<DownloadPage> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
               children: [
-                if (!loadingSettings && !validBackend(api.options.baseUrl))
-                  Card(
-                    margin: const EdgeInsets.only(bottom: 16),
-                    child: ListTile(
-                      leading: const Icon(Icons.dns_outlined),
-                      title: const Text('Connect to your backend'),
-                      subtitle: const Text(
-                        'Set the server address to start downloading.',
-                      ),
-                      trailing: const Icon(Icons.chevron_right_rounded),
-                      onTap: editBackend,
-                    ),
-                  ),
                 TextField(
                   controller: url,
                   enabled: !busy,
@@ -486,7 +502,7 @@ class _DownloadPageState extends State<DownloadPage> {
                   onSubmitted: (_) => inspect(),
                   decoration: InputDecoration(
                     labelText: 'Video link',
-                    hintText: 'Direct MP4 or YouTube Shorts',
+                    hintText: 'Paste an HTTPS MP4 or Shorts link',
                     border: const OutlineInputBorder(),
                     suffixIcon: IconButton(
                       tooltip: 'Paste link',
