@@ -15,6 +15,7 @@ class ClipSave extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'ClipSave',
+    debugShowCheckedModeBanner: false,
     theme: ThemeData(
       colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff006b58)),
       useMaterial3: true,
@@ -364,7 +365,9 @@ class _DownloadPageState extends State<DownloadPage> {
   }
 
   void cancel() {
-    transfer?.cancel();
+    final active = transfer;
+    if (active == null || active.isCancelled) return;
+    active.cancel();
     setState(() {
       phase = 'Canceling';
       progress = null;
@@ -432,10 +435,21 @@ class _DownloadPageState extends State<DownloadPage> {
   Widget build(BuildContext context) {
     final busy = loadingSettings || inspecting || transfer != null;
     final theme = Theme.of(context);
+    final colors = theme.colorScheme;
     final data = preview;
+    final activity = inspecting ? 'Checking link…' : phase;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ClipSave'),
+        title: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.asset('assets/clipsave.png', width: 36, height: 36),
+            ),
+            const SizedBox(width: 10),
+            const Text('ClipSave'),
+          ],
+        ),
         actions: [
           IconButton(
             tooltip: 'Settings',
@@ -449,8 +463,21 @@ class _DownloadPageState extends State<DownloadPage> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 560),
             child: ListView(
-              padding: const EdgeInsets.all(20),
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
               children: [
+                if (!loadingSettings && !validBackend(api.options.baseUrl))
+                  Card(
+                    margin: const EdgeInsets.only(bottom: 16),
+                    child: ListTile(
+                      leading: const Icon(Icons.dns_outlined),
+                      title: const Text('Connect to your backend'),
+                      subtitle: const Text(
+                        'Set the server address to start downloading.',
+                      ),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: editBackend,
+                    ),
+                  ),
                 TextField(
                   controller: url,
                   enabled: !busy,
@@ -483,11 +510,11 @@ class _DownloadPageState extends State<DownloadPage> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                OutlinedButton(
+                FilledButton.tonalIcon(
                   onPressed: busy ? null : inspect,
-                  child: Text(inspecting ? 'Checking link…' : 'Preview link'),
+                  icon: const Icon(Icons.link_rounded),
+                  label: const Text('Preview link'),
                 ),
-                if (inspecting) const LinearProgressIndicator(),
                 if (data != null) ...[
                   const SizedBox(height: 16),
                   Card(
@@ -546,32 +573,38 @@ class _DownloadPageState extends State<DownloadPage> {
                     label: Text(failed ? 'Retry download' : 'Download MP4'),
                   ),
                 ],
-                if (phase != null) ...[
-                  const SizedBox(height: 16),
-                  Text(
-                    progress == null
-                        ? phase!
-                        : '${phase!} · ${(progress! * 100).round()}%',
-                  ),
-                  const SizedBox(height: 8),
-                  LinearProgressIndicator(
-                    value: progress?.clamp(0.0, 1.0).toDouble(),
-                  ),
-                  TextButton(
-                    onPressed: transfer?.isCancelled == true ? null : cancel,
-                    child: const Text('Cancel download'),
-                  ),
-                ],
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 220),
+                  child: activity == null
+                      ? const SizedBox.shrink()
+                      : _LoadingCard(
+                          label: activity,
+                          progress: inspecting ? null : progress,
+                          canCancel: phase != null,
+                          onCancel: transfer?.isCancelled == true
+                              ? null
+                              : cancel,
+                        ),
+                ),
                 if (message != null)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     child: Semantics(liveRegion: true, child: Text(message!)),
                   ),
-                const SizedBox(height: 24),
-                Text('Saved videos', style: theme.textTheme.titleLarge),
-                const SizedBox(height: 8),
+                const SizedBox(height: 22),
+                const Divider(),
+                const SizedBox(height: 12),
+                Text('Saved videos', style: theme.textTheme.titleMedium),
+                const SizedBox(height: 12),
                 if (saved.isEmpty)
-                  const Text('Your downloaded MP4s will appear here.'),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(
+                      Icons.video_library_outlined,
+                      color: colors.onSurfaceVariant,
+                    ),
+                    title: const Text('Your downloaded MP4s will appear here.'),
+                  ),
                 for (final video in saved)
                   ListTile(
                     contentPadding: EdgeInsets.zero,
@@ -603,6 +636,61 @@ class _DownloadPageState extends State<DownloadPage> {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LoadingCard extends StatelessWidget {
+  const _LoadingCard({
+    required this.label,
+    required this.progress,
+    required this.canCancel,
+    required this.onCancel,
+  });
+
+  final String label;
+  final double? progress;
+  final bool canCancel;
+  final VoidCallback? onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final ratio = progress?.clamp(0.0, 1.0).toDouble();
+    return Card(
+      margin: const EdgeInsets.only(top: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Semantics(
+                    liveRegion: true,
+                    child: Text(label, style: theme.textTheme.titleSmall),
+                  ),
+                ),
+                if (ratio != null) Text('${(ratio * 100).round()}%'),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: LinearProgressIndicator(value: ratio, minHeight: 6),
+            ),
+            if (canCancel)
+              Align(
+                alignment: AlignmentDirectional.centerEnd,
+                child: TextButton(
+                  onPressed: onCancel,
+                  child: const Text('Cancel download'),
+                ),
+              ),
+          ],
         ),
       ),
     );
