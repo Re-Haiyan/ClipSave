@@ -67,7 +67,32 @@ class DirectMedia {
         if (candidates.isEmpty || candidates.any((address) => !isPublicIPv4(address))) {
           throw const FormatException('The link must point to a public video server.');
         }
-        return Socket.startConnect(candidates.first, url.port);
+        final connection = await Socket.startConnect(candidates.first, url.port);
+        Socket? rawSocket;
+        var canceled = false;
+        final secured = connection.socket.then<Socket>((socket) async {
+          if (canceled) {
+            socket.destroy();
+            throw const SocketException('Connection canceled.');
+          }
+          rawSocket = socket;
+          try {
+            // Keep hostname verification and SNI when connecting to a pinned IP.
+            return await SecureSocket.secure(socket, host: url.host)
+                .timeout(const Duration(seconds: 10));
+          } catch (_) {
+            socket.destroy();
+            rethrow;
+          }
+        });
+        return ConnectionTask.fromSocket(secured, () {
+          canceled = true;
+          if (rawSocket == null) {
+            connection.cancel();
+          } else {
+            rawSocket!.destroy();
+          }
+        });
       };
     var timedOut = false;
     final deadline = Timer(Duration(seconds: partial == null ? 25 : 240), () {
